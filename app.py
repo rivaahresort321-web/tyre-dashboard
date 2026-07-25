@@ -5,7 +5,7 @@ import io
 
 # 1. PAGE SETUP
 st.set_page_config(page_title="Tyre Dashboard", layout="wide", initial_sidebar_state="auto")
-st.title("Rubber Compound Dashboard 3.0")
+st.title("Rubber Compound Dashboard 4.0")
 
 # 2. SESSION STATE MEMORY
 if "df_clean" not in st.session_state:
@@ -20,7 +20,6 @@ uploaded_file = st.sidebar.file_uploader("Upload New Excel Template", type=["xls
 
 if uploaded_file is not None:
     try:
-        # Read Data
         df_raw = pd.read_excel(uploaded_file, sheet_name='SUMMARY')
         comp_row = df_raw.iloc[2]
         property_col_name = df_raw.columns[0]
@@ -44,11 +43,10 @@ if uploaded_file is not None:
         df_clean = df_data.dropna(subset=compound_names, how='all').reset_index(drop=True)
         df_clean = df_clean.fillna(0)
 
-        # Make duplicates unique
+        # Make duplicates unique (Aged properties get labeled with (1))
         s = df_clean['Property']
         df_clean['Property'] = s.where(~s.duplicated(), s + ' (' + s.groupby(s).cumcount().astype(str) + ')')
         
-        # Save to Memory
         st.session_state.df_clean = df_clean
         st.session_state.compound_names = compound_names
         st.session_state.file_name = uploaded_file.name
@@ -67,19 +65,13 @@ if st.session_state.df_clean is not None:
     all_properties = df_clean['Property'].tolist()
     LOWER_IS_BETTER = ['MH - ML', 'tanD @70°C', 'Abrasion Loss', 'Heat Buildup'] 
 
-    # --- FILE DETAILS PANEL ---
-    with st.expander(f"📄 Active File: {st.session_state.file_name}", expanded=False):
-        st.write(f"**Compounds:** {st.session_state.file_details['Compounds Detected']}")
-        st.write(f"**Properties Mapped:** {st.session_state.file_details['Total Properties']}")
-        st.info("Upload a new file in the sidebar to replace this data.")
+    # Default properties for first load
+    if "prop_selector" not in st.session_state:
+        st.session_state.prop_selector = all_properties[:6] if len(all_properties) >= 6 else all_properties
 
     # --- UI CONTROLS ---
     st.sidebar.header("🎯 Review Baseline")
-    reference_compound = st.sidebar.selectbox(
-        "Select Reference (Baseline for Delta Heatmap):", 
-        compound_names,
-        help="This compound will act as the '100' baseline for color calculations."
-    )
+    reference_compound = st.sidebar.selectbox("Select Reference (For Heatmap):", compound_names)
 
     st.sidebar.header("⚙️ View Mode")
     mode = st.sidebar.radio("Values to Display:", ["Absolute Values", "Indexed against 100"])
@@ -87,8 +79,7 @@ if st.session_state.df_clean is not None:
     st.sidebar.header("🎨 Customize Colors")
     with st.sidebar.expander("Pick Compound Colors"):
         compound_colors = {}
-        # Default professional hex colors
-        default_colors = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd', '#8c564b']
+        default_colors = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd']
         for i, comp in enumerate(compound_names):
             compound_colors[comp] = st.color_picker(f"{comp}", default_colors[i % len(default_colors)])
 
@@ -98,15 +89,24 @@ if st.session_state.df_clean is not None:
     
     show_target = False
     if mode == "Indexed against 100":
-        show_target = st.sidebar.checkbox("Show Target Envelope (±5%)", value=True)
+        # Target envelope now unticked by default
+        show_target = st.sidebar.checkbox("Show Target Envelope (±5%)", value=False) 
 
-    # Main Area Selector
-    st.subheader("Select Properties to Visualize")
-    default_props = all_properties[:6] if len(all_properties) >= 6 else all_properties
+    # --- SMART QUICK FILTERS ---
+    st.subheader("Property Selection")
+    
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
+    if col1.button("🟢 Unaged Properties"):
+        st.session_state.prop_selector = [p for p in all_properties if not ("(1)" in p or "(2)" in p or "Aged" in p)]
+    if col2.button("🔥 Aged Properties"):
+        st.session_state.prop_selector = [p for p in all_properties if ("(1)" in p or "(2)" in p or "Aged" in p)]
+    if col3.button("📋 All Properties"):
+        st.session_state.prop_selector = all_properties
+
     selected_properties = st.multiselect(
-        "Tap to add/remove properties:", 
+        "Or add/remove properties manually:", 
         options=all_properties, 
-        default=default_props
+        key="prop_selector" # Ties the dropdown to the buttons above
     )
     st.divider()
 
@@ -114,22 +114,19 @@ if st.session_state.df_clean is not None:
         tab1, tab2, tab3 = st.tabs(["📊 Interactive Radar", "🚦 Delta Heatmap", "📋 Raw Data"])
         df_filtered = df_clean[df_clean['Property'].isin(selected_properties)]
         
-        # --- CALCULATE BOTH ABSOLUTE AND INDEXED VALUES ---
-        display_data = {} # What the user sees
-        index_data = {}   # What drives the background logic & colors
+        # --- CALCULATE VALUES ---
+        display_data = {} 
+        index_data = {}   
         
         for compound in compound_names:
             ref_values = df_filtered[reference_compound].tolist()
             raw_values = df_filtered[compound].tolist()
-            
-            d_vals = []
-            i_vals = []
+            d_vals, i_vals = [], []
             
             for i, prop in enumerate(selected_properties):
                 val = raw_values[i]
                 ref = ref_values[i]
                 
-                # Calculate index strictly for coloring & radar logic
                 if pd.isna(val) or pd.isna(ref) or ref == 0:
                     idx = 0
                 elif prop in LOWER_IS_BETTER:
@@ -145,10 +142,8 @@ if st.session_state.df_clean is not None:
         
         # --- TAB 1: RADAR CHART ---
         with tab1:
-            st.info("🖱️ **Tip:** You can now **scroll your mouse wheel** to zoom in/out, and click & drag to move the radar.")
             fig = go.Figure()
             
-            # Target Envelope (Only when viewing Index mode)
             if mode == "Indexed against 100" and show_target:
                 theta_closed = selected_properties + [selected_properties[0]]
                 fig.add_trace(go.Scatterpolar(
@@ -191,7 +186,6 @@ if st.session_state.df_clean is not None:
                 height=650, margin=dict(t=50, b=100, l=30, r=30)
             )
             
-            # The 'config' line enables the zoom on hover
             st.plotly_chart(fig, use_container_width=True, config={
                 'scrollZoom': True, 
                 'displayModeBar': True,
@@ -201,12 +195,11 @@ if st.session_state.df_clean is not None:
         # --- TAB 2: DELTA HEATMAP ---
         with tab2:
             st.markdown(f"### Performance Matrix vs {reference_compound}")
-            st.info("🟩 Improved (>5%) | 🟨 Specs (±5%) | 🟥 Degraded (>5%) — *Colors apply even in Absolute view!*")
+            st.info("🟩 Improved (>5%) | 🟨 Specs (±5%) | 🟥 Degraded (>5%)")
             
             df_display = pd.DataFrame(display_data, index=selected_properties)
             df_index = pd.DataFrame(index_data, index=selected_properties)
             
-            # Function to color cells based on the hidden Index DataFrame
             def highlight_matrix(display_df, index_df):
                 styles = pd.DataFrame('', index=display_df.index, columns=display_df.columns)
                 for row in display_df.index:
@@ -222,8 +215,8 @@ if st.session_state.df_clean is not None:
                             styles.loc[row, col] = 'background-color: #fff3cd; color: #856404;'
                 return styles
             
-            # Apply styles
             styled_df = df_display.style.format("{:.2f}").apply(lambda x: highlight_matrix(df_display, df_index), axis=None)
+            # use_container_width ensures auto-fitting to the screen size
             st.dataframe(styled_df, use_container_width=True)
 
         # --- TAB 3: RAW DATA ---
