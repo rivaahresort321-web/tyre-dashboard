@@ -26,9 +26,11 @@ df_scaled = pd.DataFrame(scaler.fit_transform(numeric_df), columns=numeric_df.co
 
 # ==========================================
 # STYLE 1: The Correlation Matrix (Static)
+# Purpose: Find out which of the 50 properties are redundant.
 # ==========================================
 plt.figure(figsize=(12, 10))
 corr = df_scaled.corr()
+# Use a diverging color map (coolwarm) to show positive/negative correlations
 sns.heatmap(corr, cmap="coolwarm", center=0, square=True, 
             xticklabels=False, yticklabels=False, 
             cbar_kws={"shrink": .8})
@@ -38,7 +40,9 @@ plt.show()
 
 # ==========================================
 # STYLE 2: The Clustered Heatmap (Static)
+# Purpose: Group similar compounds and similar properties together.
 # ==========================================
+# We use seaborn's clustermap which adds dendrograms automatically
 clustermap = sns.clustermap(df_scaled, cmap="viridis", figsize=(14, 12),
                             xticklabels=False, yticklabels=False,
                             method='ward', metric='euclidean')
@@ -46,23 +50,29 @@ clustermap.fig.suptitle('Style 2: Clustered Heatmap of Compounds vs. Properties'
 plt.show()
 
 # ==========================================
-# STYLE 3: Interactive 2D PCA Scatter Plot (Plotly)
+# STYLE 3: Interactive PCA Scatter Plot (Plotly)
+# Purpose: Compress 50 dimensions into 2D to see "clusters" of compounds.
 # ==========================================
-pca_2d = PCA(n_components=2)
-pca_2d_results = pca_2d.fit_transform(df_scaled)
-df['PCA1'] = pca_2d_results[:, 0]
-df['PCA2'] = pca_2d_results[:, 1]
+# Run PCA to reduce 50 properties down to 2 principal components
+pca = PCA(n_components=2)
+pca_results = pca.fit_transform(df_scaled)
+df['PCA1'] = pca_results[:, 0]
+df['PCA2'] = pca_results[:, 1]
 
-fig_pca_2d = px.scatter(df, x='PCA1', y='PCA2', color='Family', 
-                        hover_name=df.index, template="plotly_dark",
-                        title="Style 3: Interactive 2D PCA Scatter Plot")
-fig_pca_2d.show()
+fig_pca = px.scatter(df, x='PCA1', y='PCA2', color='Family', 
+                     hover_name=df.index, template="plotly_dark",
+                     title="Style 3: Interactive PCA Scatter Plot (Hover for details)")
+fig_pca.show()
 
 # ==========================================
 # STYLE 4: Interactive Parallel Coordinates (Plotly)
+# Purpose: Visually filter compounds based on specific property thresholds.
 # ==========================================
+# Map the categorical 'Family' to numbers for the color scale
 family_mapping = {'Kinase Inhibitor': 1, 'GPCR Target': 2, 'Ion Channel': 3}
 df['Family_ID'] = df['Family'].map(family_mapping)
+
+# We'll plot just the first 8 properties so it isn't visually overwhelming
 cols_to_plot = [f"Prop_{i:02d}" for i in range(1, 9)]
 
 fig_parallel = px.parallel_coordinates(df, color="Family_ID", dimensions=cols_to_plot,
@@ -72,66 +82,16 @@ fig_parallel.show()
 
 # ==========================================
 # STYLE 5: Violin Plot Distribution Grid (Static)
+# Purpose: Compare the spread of specific properties across compound families.
 # ==========================================
-df_melted_violin = df.reset_index().melt(id_vars=['index', 'Family'], 
-                                         value_vars=['Prop_01', 'Prop_02', 'Prop_03', 'Prop_04'],
-                                         var_name='Property', value_name='Value')
+# Melt the dataframe to make it compatible with Seaborn's faceted plots
+df_melted = df.reset_index().melt(id_vars=['index', 'Family'], 
+                                  value_vars=['Prop_01', 'Prop_02', 'Prop_03', 'Prop_04'],
+                                  var_name='Property', value_name='Value')
 
 plt.figure(figsize=(12, 6))
-sns.violinplot(data=df_melted_violin, x='Property', y='Value', hue='Family', split=False, inner="quartile", palette="Set2")
+sns.violinplot(data=df_melted, x='Property', y='Value', hue='Family', split=False, inner="quartile", palette="Set2")
 plt.title("Style 5: Property Distribution by Compound Family", fontsize=16)
 plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
 plt.tight_layout()
 plt.show()
-
-# ==========================================
-# NEW STYLE 6: Interactive 3D PCA Scatter Plot (Plotly)
-# Purpose: Add a third dimension to better visualize complex clusters.
-# ==========================================
-# We need 3 principal components instead of 2
-pca_3d = PCA(n_components=3)
-pca_3d_results = pca_3d.fit_transform(df_scaled)
-df['PCA1_3D'] = pca_3d_results[:, 0]
-df['PCA2_3D'] = pca_3d_results[:, 1]
-df['PCA3_3D'] = pca_3d_results[:, 2]
-
-fig_pca_3d = px.scatter_3d(df, x='PCA1_3D', y='PCA2_3D', z='PCA3_3D',
-                           color='Family', hover_name=df.index, 
-                           template="plotly_dark", opacity=0.8,
-                           title="Style 6: Interactive 3D PCA Scatter Plot")
-fig_pca_3d.update_traces(marker=dict(size=5)) # Make dots slightly smaller for 3D
-fig_pca_3d.show()
-
-# ==========================================
-# NEW STYLE 7: Grouped Bar Chart (Plotly)
-# Purpose: Compare the *average* values of specific properties across families.
-# ==========================================
-# Let's take the first 6 properties and find the average for each family
-cols_for_bar = [f"Prop_{i:02d}" for i in range(1, 7)]
-df_mean_bar = df.groupby('Family')[cols_for_bar].mean().reset_index()
-
-# Melt the dataframe so Plotly can group it easily
-df_mean_bar_melted = df_mean_bar.melt(id_vars='Family', var_name='Property', value_name='Average Value')
-
-fig_bar = px.bar(df_mean_bar_melted, x='Property', y='Average Value', color='Family', 
-                 barmode='group', template="plotly_white",
-                 title="Style 7: Average Property Values by Compound Family")
-fig_bar.show()
-
-# ==========================================
-# NEW STYLE 8: Radar Chart / Spider Plot (Plotly)
-# Purpose: Show the "fingerprint" profile of each family across multiple properties.
-# ==========================================
-# We'll use 8 properties to give the radar chart a nice shape
-cols_for_radar = [f"Prop_{i:02d}" for i in range(1, 9)]
-df_mean_radar = df_scaled.groupby(df['Family'])[cols_for_radar].mean().reset_index()
-
-# Melt the data into a long format for the polar chart
-df_radar_melted = df_mean_radar.melt(id_vars='Family', var_name='Property', value_name='Standardized Mean')
-
-fig_radar = px.line_polar(df_radar_melted, r='Standardized Mean', theta='Property', color='Family',
-                          line_close=True, template="plotly_dark",
-                          title="Style 8: Radar Chart Profiling (Standardized Means)")
-# Fill the area under the lines to make it look like a classic radar chart
-fig_radar.update_traces(fill='toself')
-fig_radar.show()
