@@ -1,99 +1,230 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
-import plotly.express as px
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
+import plotly.graph_objects as go
+import io
 
-# Page configuration
-st.set_page_config(page_title="Compound Analysis Dashboard", layout="wide")
-st.title("Compound Property Analysis (50 Dimensions)")
+# 1. PAGE SETUP
+st.set_page_config(page_title="Tyre Dashboard", layout="wide", initial_sidebar_state="auto")
+st.title("Rubber Compound Dashboard 4.0")
 
-# ==========================================
-# 1. GENERATE MOCK DATA 
-# ==========================================
-np.random.seed(42)
-compounds = [f"Compound_{i:03d}" for i in range(1, 101)]
-data = {f"Prop_{i:02d}": np.random.randn(100) * 10 for i in range(1, 51)}
-df = pd.DataFrame(data, index=compounds)
-df['Family'] = np.random.choice(['Kinase Inhibitor', 'GPCR Target', 'Ion Channel'], 100)
+# 2. SESSION STATE MEMORY
+if "df_clean" not in st.session_state:
+    st.session_state.df_clean = None
+    st.session_state.compound_names = []
+    st.session_state.file_name = None
+    st.session_state.file_details = {}
 
-numeric_df = df.drop(columns=['Family'])
-scaler = StandardScaler()
-df_scaled = pd.DataFrame(scaler.fit_transform(numeric_df), columns=numeric_df.columns, index=numeric_df.index)
+# 3. SIDEBAR: FILE MANAGEMENT
+st.sidebar.header("📁 File Management")
+uploaded_file = st.sidebar.file_uploader("Upload New Excel Template", type=["xlsx", "xls"])
 
-# ==========================================
-# STYLE 1: The Correlation Matrix 
-# ==========================================
-st.subheader("1. Correlation Matrix of 50 Properties")
-st.write("Identifies which of the 50 properties are redundant.")
+if uploaded_file is not None:
+    try:
+        df_raw = pd.read_excel(uploaded_file, sheet_name='SUMMARY')
+        comp_row = df_raw.iloc[2]
+        property_col_name = df_raw.columns[0]
+        
+        compound_cols = []
+        compound_names = []
+        for i in range(2, len(df_raw.columns)):
+            val = str(comp_row.iloc[i]).strip()
+            if val and val.lower() != 'nan':
+                compound_cols.append(df_raw.columns[i])
+                compound_names.append(val)
 
-fig1, ax1 = plt.subplots(figsize=(12, 8))
-corr = df_scaled.corr()
-sns.heatmap(corr, cmap="coolwarm", center=0, square=True, 
-            xticklabels=False, yticklabels=False, cbar_kws={"shrink": .8}, ax=ax1)
-st.pyplot(fig1) # <-- Streamlit command for Matplotlib/Seaborn
+        df_data = df_raw.iloc[3:].copy()
+        df_data = df_data[[property_col_name] + compound_cols]
+        df_data = df_data.dropna(subset=[property_col_name])
+        df_data.columns = ['Property'] + compound_names
 
-st.divider()
+        for col in compound_names:
+            df_data[col] = pd.to_numeric(df_data[col], errors='coerce')
 
-# ==========================================
-# STYLE 2: The Clustered Heatmap 
-# ==========================================
-st.subheader("2. Clustered Heatmap")
-st.write("Groups similar compounds and similar properties together.")
+        df_clean = df_data.dropna(subset=compound_names, how='all').reset_index(drop=True)
+        df_clean = df_clean.fillna(0)
 
-clustermap = sns.clustermap(df_scaled, cmap="viridis", figsize=(12, 10),
-                            xticklabels=False, yticklabels=False,
-                            method='ward', metric='euclidean')
-st.pyplot(clustermap.fig) # <-- Pass the clustermap figure to Streamlit
+        # Make duplicates unique (Aged properties get labeled with (1))
+        s = df_clean['Property']
+        df_clean['Property'] = s.where(~s.duplicated(), s + ' (' + s.groupby(s).cumcount().astype(str) + ')')
+        
+        st.session_state.df_clean = df_clean
+        st.session_state.compound_names = compound_names
+        st.session_state.file_name = uploaded_file.name
+        st.session_state.file_details = {
+            "Total Properties": len(df_clean),
+            "Compounds Detected": ", ".join(compound_names)
+        }
+        
+    except Exception as e:
+        st.sidebar.error(f"Error processing file: {e}")
 
-st.divider()
+# 4. DASHBOARD RENDER
+if st.session_state.df_clean is not None:
+    df_clean = st.session_state.df_clean
+    compound_names = st.session_state.compound_names
+    all_properties = df_clean['Property'].tolist()
+    LOWER_IS_BETTER = ['MH - ML', 'tanD @70°C', 'Abrasion Loss', 'Heat Buildup'] 
 
-# ==========================================
-# STYLE 3: Interactive PCA Scatter Plot
-# ==========================================
-st.subheader("3. Interactive PCA Scatter Plot")
-st.write("Compresses 50 dimensions into 2D to find clusters. (Hover for details)")
+    # Default properties for first load
+    if "prop_selector" not in st.session_state:
+        st.session_state.prop_selector = all_properties[:6] if len(all_properties) >= 6 else all_properties
 
-pca = PCA(n_components=2)
-pca_results = pca.fit_transform(df_scaled)
-df['PCA1'] = pca_results[:, 0]
-df['PCA2'] = pca_results[:, 1]
+    # --- UI CONTROLS ---
+    st.sidebar.header("🎯 Review Baseline")
+    reference_compound = st.sidebar.selectbox("Select Reference (For Heatmap):", compound_names)
 
-fig_pca = px.scatter(df, x='PCA1', y='PCA2', color='Family', 
-                     hover_name=df.index, template="plotly_dark")
-st.plotly_chart(fig_pca, use_container_width=True) # <-- Streamlit command for Plotly
+    st.sidebar.header("⚙️ View Mode")
+    mode = st.sidebar.radio("Values to Display:", ["Absolute Values", "Indexed against 100"])
 
-st.divider()
+    st.sidebar.header("🎨 Customize Colors")
+    with st.sidebar.expander("Pick Compound Colors"):
+        compound_colors = {}
+        default_colors = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd']
+        for i, comp in enumerate(compound_names):
+            compound_colors[comp] = st.color_picker(f"{comp}", default_colors[i % len(default_colors)])
 
-# ==========================================
-# STYLE 4: Interactive Parallel Coordinates
-# ==========================================
-st.subheader("4. Parallel Coordinates")
-st.write("Drag vertically along the axes to filter compounds by property thresholds.")
+    st.sidebar.header("📈 Chart Aesthetics")
+    show_labels = st.sidebar.checkbox("Show Data Values", value=True)
+    fill_area = st.sidebar.checkbox("Fill Radar Area", value=True)
+    
+    show_target = False
+    if mode == "Indexed against 100":
+        # Target envelope now unticked by default
+        show_target = st.sidebar.checkbox("Show Target Envelope (±5%)", value=False) 
 
-family_mapping = {'Kinase Inhibitor': 1, 'GPCR Target': 2, 'Ion Channel': 3}
-df['Family_ID'] = df['Family'].map(family_mapping)
-cols_to_plot = [f"Prop_{i:02d}" for i in range(1, 9)]
+    # --- SMART QUICK FILTERS ---
+    st.subheader("Property Selection")
+    
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
+    if col1.button("🟢 Unaged Properties"):
+        st.session_state.prop_selector = [p for p in all_properties if not ("(1)" in p or "(2)" in p or "Aged" in p)]
+    if col2.button("🔥 Aged Properties"):
+        st.session_state.prop_selector = [p for p in all_properties if ("(1)" in p or "(2)" in p or "Aged" in p)]
+    if col3.button("📋 All Properties"):
+        st.session_state.prop_selector = all_properties
 
-fig_parallel = px.parallel_coordinates(df, color="Family_ID", dimensions=cols_to_plot,
-                                       color_continuous_scale=px.colors.diverging.Tealrose)
-st.plotly_chart(fig_parallel, use_container_width=True)
+    selected_properties = st.multiselect(
+        "Or add/remove properties manually:", 
+        options=all_properties, 
+        key="prop_selector" # Ties the dropdown to the buttons above
+    )
+    st.divider()
 
-st.divider()
+    if len(selected_properties) > 2:
+        tab1, tab2, tab3 = st.tabs(["📊 Interactive Radar", "🚦 Delta Heatmap", "📋 Raw Data"])
+        df_filtered = df_clean[df_clean['Property'].isin(selected_properties)]
+        
+        # --- CALCULATE VALUES ---
+        display_data = {} 
+        index_data = {}   
+        
+        for compound in compound_names:
+            ref_values = df_filtered[reference_compound].tolist()
+            raw_values = df_filtered[compound].tolist()
+            d_vals, i_vals = [], []
+            
+            for i, prop in enumerate(selected_properties):
+                val = raw_values[i]
+                ref = ref_values[i]
+                
+                if pd.isna(val) or pd.isna(ref) or ref == 0:
+                    idx = 0
+                elif prop in LOWER_IS_BETTER:
+                    idx = (ref / val * 100) if val != 0 else 0
+                else:
+                    idx = (val / ref * 100)
+                
+                i_vals.append(idx)
+                d_vals.append(val if mode == "Absolute Values" else idx)
+                
+            display_data[compound] = d_vals
+            index_data[compound] = i_vals
+        
+        # --- TAB 1: RADAR CHART ---
+        with tab1:
+            fig = go.Figure()
+            
+            if mode == "Indexed against 100" and show_target:
+                theta_closed = selected_properties + [selected_properties[0]]
+                fig.add_trace(go.Scatterpolar(
+                    r=[105]*len(theta_closed), theta=theta_closed,
+                    mode='lines', line_color='rgba(0,0,0,0)', showlegend=False, hoverinfo='skip'
+                ))
+                fig.add_trace(go.Scatterpolar(
+                    r=[95]*len(theta_closed), theta=theta_closed,
+                    mode='lines', fill='tonext', fillcolor='rgba(46, 204, 113, 0.2)', 
+                    line_color='rgba(46, 204, 113, 0.5)', line_width=1,
+                    name='Target (±5%)', hoverinfo='skip'
+                ))
 
-# ==========================================
-# STYLE 5: Violin Plot Distribution Grid
-# ==========================================
-st.subheader("5. Property Distribution by Compound Family")
+            for compound in compound_names:
+                r_plot = display_data[compound] + [display_data[compound][0]] 
+                theta_plot = selected_properties + [selected_properties[0]]
+                text_labels = [f"{val:.1f}" for val in r_plot]
+                
+                fig.add_trace(go.Scatterpolar(
+                    r=r_plot, theta=theta_plot,
+                    fill='toself' if fill_area else 'none',
+                    name=compound,
+                    mode='lines+markers+text' if show_labels else 'lines+markers',
+                    line=dict(color=compound_colors[compound]),
+                    marker=dict(size=8, color=compound_colors[compound]),
+                    text=text_labels, textposition="top center",
+                    textfont=dict(size=11, color="black"),
+                    hoverinfo="text",
+                    hovertext=[f"<b>{prop}</b><br>{compound}: {val:.1f}" for prop, val in zip(theta_plot, r_plot)]
+                ))
+                
+            fig.update_layout(
+                polar=dict(
+                    radialaxis=dict(visible=True, showline=True, gridcolor="lightgrey"),
+                    angularaxis=dict(gridcolor="lightgrey"),
+                    bgcolor="rgba(245, 245, 245, 0.3)"
+                ),
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
+                height=650, margin=dict(t=50, b=100, l=30, r=30)
+            )
+            
+            st.plotly_chart(fig, use_container_width=True, config={
+                'scrollZoom': True, 
+                'displayModeBar': True,
+                'displaylogo': False
+            })
 
-df_melted = df.reset_index().melt(id_vars=['index', 'Family'], 
-                                  value_vars=['Prop_01', 'Prop_02', 'Prop_03', 'Prop_04'],
-                                  var_name='Property', value_name='Value')
+        # --- TAB 2: DELTA HEATMAP ---
+        with tab2:
+            st.markdown(f"### Performance Matrix vs {reference_compound}")
+            st.info("🟩 Improved (>5%) | 🟨 Specs (±5%) | 🟥 Degraded (>5%)")
+            
+            df_display = pd.DataFrame(display_data, index=selected_properties)
+            df_index = pd.DataFrame(index_data, index=selected_properties)
+            
+            def highlight_matrix(display_df, index_df):
+                styles = pd.DataFrame('', index=display_df.index, columns=display_df.columns)
+                for row in display_df.index:
+                    for col in display_df.columns:
+                        idx_val = index_df.loc[row, col]
+                        if pd.isna(idx_val) or idx_val == 0:
+                            styles.loc[row, col] = ''
+                        elif idx_val >= 105:
+                            styles.loc[row, col] = 'background-color: #d4edda; color: #155724; font-weight: bold;'
+                        elif idx_val <= 95:
+                            styles.loc[row, col] = 'background-color: #f8d7da; color: #721c24; font-weight: bold;'
+                        else:
+                            styles.loc[row, col] = 'background-color: #fff3cd; color: #856404;'
+                return styles
+            
+            styled_df = df_display.style.format("{:.2f}").apply(lambda x: highlight_matrix(df_display, df_index), axis=None)
+            # use_container_width ensures auto-fitting to the screen size
+            st.dataframe(styled_df, use_container_width=True)
 
-fig5, ax5 = plt.subplots(figsize=(12, 6))
-sns.violinplot(data=df_melted, x='Property', y='Value', hue='Family', split=False, inner="quartile", palette="Set2", ax=ax5)
-plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-st.pyplot(fig5)
+        # --- TAB 3: RAW DATA ---
+        with tab3:
+            st.markdown("### Absolute Values (Unformatted)")
+            st.dataframe(df_filtered.set_index('Property'), use_container_width=True)
+            
+    else:
+        st.warning("⚠️ Radar charts require at least 3 properties to draw a shape. Please select more.")
+else:
+    st.info("Welcome! Please upload your Excel file on the left menu to generate the dashboard.")
