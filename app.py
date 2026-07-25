@@ -157,7 +157,6 @@ if st.session_state.df_clean is not None:
                     hovertext=[f"<b>{prop}</b><br>{compound}: {val:.1f}" for prop, val in zip(theta_plot, r_plot)]
                 ))
                 
-            # MOBILE OPTIMIZED LAYOUT: Legend moved to the bottom, margins reduced
             fig.update_layout(
                 polar=dict(
                     radialaxis=dict(visible=True, showline=True, gridcolor="lightgrey"),
@@ -184,7 +183,8 @@ if st.session_state.df_clean is not None:
                     elif val <= 95: return 'background-color: #f8d7da; color: #721c24; font-weight: bold;'
                     return 'background-color: #fff3cd; color: #856404;'
                 
-                styled_df = df_heatmap.style.format("{:.1f}").applymap(highlight_performance)
+                # FIX: applymap() changed to map() for Pandas 2.1.0+ compatibility
+                styled_df = df_heatmap.style.format("{:.1f}").map(highlight_performance)
                 st.dataframe(styled_df, use_container_width=True)
             else:
                 st.warning("Switch to 'Indexed against 100' mode in the sidebar to view the color-coded delta heatmap.")
