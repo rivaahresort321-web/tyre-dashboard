@@ -2,95 +2,107 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
-# Set up the web page layout
 st.set_page_config(page_title="Tyre Compound Review", layout="wide")
 st.title("Rubber Compound Property Review")
 
-# 1. Sidebar for File Upload
 st.sidebar.header("1. Upload Data")
 uploaded_file = st.sidebar.file_uploader("Upload your Excel template", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
-    # Read the Excel file automatically
-    df = pd.read_excel(uploaded_file)
-    
-    # We assume the first column is the list of properties, and the rest are compounds
-    property_col = df.columns[0]
-    compounds = df.columns[1:].tolist()
-
-    # 2. Two-Page Navigation (Using Sidebar)
-    st.sidebar.header("2. Dashboard View")
-    view = st.sidebar.radio("Select View:", [
-        "Internal Dept Review (All Properties)", 
-        "Cross-Functional (Selective)"
-    ])
-    
-    # 3. Chart Settings (Absolute vs Indexed)
-    st.sidebar.header("3. Chart Settings")
-    mode = st.sidebar.radio("Values to Display:", ["Absolute Values", "Indexed against 100"])
-    
-    reference_compound = None
-    if mode == "Indexed against 100":
-        reference_compound = st.sidebar.selectbox("Select Reference Compound:", compounds)
+    try:
+        # 1. Read the specific SUMMARY sheet
+        df_raw = pd.read_excel(uploaded_file, sheet_name='SUMMARY')
         
-    # Determine which properties to show based on the selected view
-    if view == "Internal Dept Review (All Properties)":
+        # 2. Clean the Data (Bypass blanks, subheaders, and find compound names)
+        comp_row = df_raw.iloc[2]
+        property_col_name = df_raw.columns[0]
+        
+        compound_cols = []
+        compound_names = []
+        for i in range(2, len(df_raw.columns)):
+            val = str(comp_row.iloc[i]).strip()
+            if val and val.lower() != 'nan':
+                compound_cols.append(df_raw.columns[i])
+                compound_names.append(val)
+
+        df_data = df_raw.iloc[3:].copy()
+        df_data = df_data[[property_col_name] + compound_cols]
+        df_data = df_data.dropna(subset=[property_col_name])
+        df_data.columns = ['Property'] + compound_names
+
+        for col in compound_names:
+            df_data[col] = pd.to_numeric(df_data[col], errors='coerce')
+
+        df_clean = df_data.dropna(subset=compound_names, how='all').reset_index(drop=True)
+        df_clean = df_clean.fillna(0)
+
+        # FIX FOR STREAMLIT ERROR: Make duplicate properties unique
+        s = df_clean['Property']
+        df_clean['Property'] = s.where(~s.duplicated(), s + ' (' + s.groupby(s).cumcount().astype(str) + ')')
+        
+        # --- Dashboard UI Setup ---
+        all_properties = df_clean['Property'].tolist()
+        
+        # Properties where lower is better
+        LOWER_IS_BETTER = ['MH - ML', 'tanD @70°C'] 
+
+        st.sidebar.header("2. Dashboard View")
+        view = st.sidebar.radio("Select View:", ["Internal Dept Review", "Cross-Functional"])
+        
+        st.sidebar.header("3. Chart Settings")
+        mode = st.sidebar.radio("Values to Display:", ["Absolute Values", "Indexed against 100"])
+        
+        reference_compound = None
+        if mode == "Indexed against 100":
+            reference_compound = st.sidebar.selectbox("Select Reference Compound:", compound_names)
+
+        # Multiselect logic using the cleaned, unique properties
+        default_props = all_properties[:5] if len(all_properties) >= 5 else all_properties
         selected_properties = st.multiselect(
             "Select Properties to Compare:", 
-            df[property_col].tolist(), 
-            default=df[property_col].tolist()[:5] # Selects first 5 by default
-        )
-    else:
-        st.info("Cross-Functional Mode: Focus on high-level KPIs.")
-        selected_properties = st.multiselect(
-            "Select Key KPIs:", 
-            df[property_col].tolist(), 
-            default=df[property_col].tolist()[:3]
+            options=all_properties, 
+            default=default_props
         )
 
-    # Filter the data based on user selection
-    df_filtered = df[df[property_col].isin(selected_properties)]
-    
-    # 4. Draw the Radar Chart
-    if len(selected_properties) > 2:
-        fig = go.Figure()
-        
-        for compound in compounds:
-            if mode == "Absolute Values":
-                r_values = df_filtered[compound].tolist()
-            else:
-                # Calculate index against 100
-                ref_values = df_filtered[reference_compound].tolist()
-                raw_values = df_filtered[compound].tolist()
+        # 4. Draw the Radar Chart
+        if len(selected_properties) > 2:
+            df_filtered = df_clean[df_clean['Property'].isin(selected_properties)]
+            fig = go.Figure()
+            
+            for compound in compound_names:
+                if mode == "Absolute Values":
+                    r_values = df_filtered[compound].tolist()
+                else:
+                    ref_values = df_filtered[reference_compound].tolist()
+                    raw_values = df_filtered[compound].tolist()
+                    r_values = []
+                    for prop, val, ref in zip(selected_properties, raw_values, ref_values):
+                        if pd.isna(val) or pd.isna(ref) or ref == 0:
+                            r_values.append(0)
+                        elif prop in LOWER_IS_BETTER:
+                            r_values.append((ref / val * 100) if val != 0 else 0)
+                        else:
+                            r_values.append((val / ref * 100))
+                            
+                r_values.append(r_values[0])
+                theta_values = selected_properties + [selected_properties[0]]
                 
-                # Formula: (Test / Reference) * 100
-                r_values = [(val / ref * 100) if ref != 0 else 0 for val, ref in zip(raw_values, ref_values)]
+                fig.add_trace(go.Scatterpolar(
+                    r=r_values,
+                    theta=theta_values,
+                    fill='toself' if compound == reference_compound else 'none',
+                    name=compound
+                ))
+                
+            fig.update_layout(polar=dict(radialaxis=dict(visible=True)), showlegend=True, height=600)
+            st.plotly_chart(fig, use_container_width=True)
             
-            # Plotly requires the first value to be repeated at the end to close the circle
-            r_values.append(r_values[0])
-            theta_values = selected_properties + [selected_properties[0]]
-            
-            # Draw the lines
-            fig.add_trace(go.Scatterpolar(
-                r=r_values,
-                theta=theta_values,
-                fill='toself' if compound == reference_compound else 'none',
-                name=compound
-            ))
-            
-        fig.update_layout(
-            polar=dict(radialaxis=dict(visible=True)), 
-            showlegend=True,
-            height=600
-        )
-        
-        # Display the chart and the raw data table
-        st.plotly_chart(fig, use_container_width=True)
-        
-        st.subheader("Raw Data Table")
-        st.dataframe(df_filtered)
-        
-    else:
-        st.warning("Radar charts require at least 3 properties to draw a shape. Please select more.")
+            st.subheader("Cleaned Raw Data")
+            st.dataframe(df_filtered)
+        else:
+            st.warning("Radar charts require at least 3 properties to draw a shape. Please select more from the dropdown.")
+
+    except Exception as e:
+        st.error(f"Error processing file: {e}")
 else:
     st.info("Please upload your Excel file on the left menu to generate the dashboard.")
